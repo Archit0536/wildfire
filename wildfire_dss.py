@@ -20,7 +20,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import auc, roc_curve
+from sklearn.metrics import auc, confusion_matrix, f1_score, log_loss, precision_score, recall_score, roc_curve
 from sklearn.model_selection import train_test_split
 
 
@@ -185,6 +185,7 @@ def evaluate_models(x: np.ndarray, y: np.ndarray) -> Dict[str, Dict[str, np.ndar
     out = {}
     for name, model in {"baseline": baseline, "quantum_inspired": qmodel}.items():
         scores = model.predict_proba(x_test)
+        preds = (scores >= 0.5).astype(int)
         fpr, tpr, _ = roc_curve(y_test, scores)
         out[name] = {
             "fpr": fpr,
@@ -192,6 +193,11 @@ def evaluate_models(x: np.ndarray, y: np.ndarray) -> Dict[str, Dict[str, np.ndar
             "auc": float(auc(fpr, tpr)),
             "scores": scores,
             "y_test": y_test,
+            "confusion_matrix": confusion_matrix(y_test, preds, labels=[0, 1]),
+            "precision": float(precision_score(y_test, preds, zero_division=0)),
+            "recall": float(recall_score(y_test, preds, zero_division=0)),
+            "f1": float(f1_score(y_test, preds, zero_division=0)),
+            "loss": float(log_loss(y_test, np.clip(scores, 1e-6, 1 - 1e-6))),
         }
     return out
 
@@ -388,7 +394,17 @@ def main() -> None:
         "n_days": len(days),
         "n_detections": len(df),
         "baseline_auc": metrics["baseline"]["auc"],
+        "baseline_precision": metrics["baseline"]["precision"],
+        "baseline_recall": metrics["baseline"]["recall"],
+        "baseline_f1": metrics["baseline"]["f1"],
+        "baseline_loss": metrics["baseline"]["loss"],
+        "baseline_confusion_matrix": metrics["baseline"]["confusion_matrix"].tolist(),
         "quantum_auc": metrics["quantum_inspired"]["auc"],
+        "quantum_precision": metrics["quantum_inspired"]["precision"],
+        "quantum_recall": metrics["quantum_inspired"]["recall"],
+        "quantum_f1": metrics["quantum_inspired"]["f1"],
+        "quantum_loss": metrics["quantum_inspired"]["loss"],
+        "quantum_confusion_matrix": metrics["quantum_inspired"]["confusion_matrix"].tolist(),
         **evac_report,
         "roc_curve": str(roc_path),
         "fire_spread_map": str(map_path),
