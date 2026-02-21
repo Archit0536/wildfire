@@ -22,6 +22,10 @@ def test_pipeline_shapes_and_metrics():
 
     metrics = evaluate_models(x, y)
     assert "baseline" in metrics
+    assert "persistence_ca" in metrics
+    assert "deterministic_ca" in metrics
     assert "quantum_inspired" in metrics
     assert 0 <= metrics["baseline"]["auc"] <= 1
+    assert 0 <= metrics["persistence_ca"]["auc"] <= 1
+    assert 0 <= metrics["deterministic_ca"]["auc"] <= 1
     assert 0 <= metrics["quantum_inspired"]["auc"] <= 1
