@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import pandas as pd
+from ca_algorithms import DeterministicCAModel, PersistenceCAModel
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import auc, confusion_matrix, f1_score, log_loss, precision_score, recall_score, roc_curve
 from sklearn.model_selection import train_test_split
@@ -177,13 +178,22 @@ def evaluate_models(x: np.ndarray, y: np.ndarray) -> Dict[str, Dict[str, np.ndar
     )
 
     baseline = BaselineSpreadModel()
+    persistence_ca = PersistenceCAModel()
+    deterministic_ca = DeterministicCAModel()
     qmodel = QuantumInspiredSpreadModel()
 
     baseline.fit(x_train, y_train)
+    persistence_ca.fit(x_train, y_train)
+    deterministic_ca.fit(x_train, y_train)
     qmodel.fit(x_train, y_train)
 
     out = {}
-    for name, model in {"baseline": baseline, "quantum_inspired": qmodel}.items():
+    for name, model in {
+        "baseline": baseline,
+        "persistence_ca": persistence_ca,
+        "deterministic_ca": deterministic_ca,
+        "quantum_inspired": qmodel,
+    }.items():
         scores = model.predict_proba(x_test)
         preds = (scores >= 0.5).astype(int)
         fpr, tpr, _ = roc_curve(y_test, scores)
@@ -322,6 +332,31 @@ def plot_roc_curves(metrics: Dict[str, Dict[str, np.ndarray | float]], out_path:
     plt.close()
 
 
+def plot_confusion_matrices(metrics: Dict[str, Dict[str, np.ndarray | float]], out_path: Path) -> None:
+    model_names = list(metrics.keys())
+    n = len(model_names)
+    fig, axes = plt.subplots(1, n, figsize=(4.0 * n, 3.8), squeeze=False)
+    axes = axes.ravel()
+
+    for ax, name in zip(axes, model_names):
+        cm = np.array(metrics[name]["confusion_matrix"])
+        im = ax.imshow(cm, cmap="Blues")
+        ax.set_title(name)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Actual")
+        ax.set_xticks([0, 1])
+        ax.set_yticks([0, 1])
+
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                ax.text(j, i, f"{cm[i, j]}", ha="center", va="center", color="black")
+
+    fig.colorbar(im, ax=axes.tolist(), fraction=0.03, pad=0.04)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close(fig)
+
+
 def plot_fire_spread_maps(
     actual: np.ndarray,
     predicted_maps: Sequence[np.ndarray],
@@ -378,8 +413,10 @@ def main() -> None:
     preds = multi_day_forecast(qmodel, seed_day, horizon=args.horizon_days)
 
     roc_path = args.output_dir / "roc_curve.png"
+    confusion_path = args.output_dir / "confusion_matrices.png"
     map_path = args.output_dir / "fire_spread_maps.png"
     plot_roc_curves(metrics, roc_path)
+    plot_confusion_matrices(metrics, confusion_path)
     plot_fire_spread_maps(actual=tensor[-1], predicted_maps=preds, out_path=map_path)
 
     # Example wildlife populations on high-risk cells and edge safe nodes
@@ -399,6 +436,18 @@ def main() -> None:
         "baseline_f1": metrics["baseline"]["f1"],
         "baseline_loss": metrics["baseline"]["loss"],
         "baseline_confusion_matrix": metrics["baseline"]["confusion_matrix"].tolist(),
+        "persistence_ca_auc": metrics["persistence_ca"]["auc"],
+        "persistence_ca_precision": metrics["persistence_ca"]["precision"],
+        "persistence_ca_recall": metrics["persistence_ca"]["recall"],
+        "persistence_ca_f1": metrics["persistence_ca"]["f1"],
+        "persistence_ca_loss": metrics["persistence_ca"]["loss"],
+        "persistence_ca_confusion_matrix": metrics["persistence_ca"]["confusion_matrix"].tolist(),
+        "deterministic_ca_auc": metrics["deterministic_ca"]["auc"],
+        "deterministic_ca_precision": metrics["deterministic_ca"]["precision"],
+        "deterministic_ca_recall": metrics["deterministic_ca"]["recall"],
+        "deterministic_ca_f1": metrics["deterministic_ca"]["f1"],
+        "deterministic_ca_loss": metrics["deterministic_ca"]["loss"],
+        "deterministic_ca_confusion_matrix": metrics["deterministic_ca"]["confusion_matrix"].tolist(),
         "quantum_auc": metrics["quantum_inspired"]["auc"],
         "quantum_precision": metrics["quantum_inspired"]["precision"],
         "quantum_recall": metrics["quantum_inspired"]["recall"],
@@ -407,8 +456,10 @@ def main() -> None:
         "quantum_confusion_matrix": metrics["quantum_inspired"]["confusion_matrix"].tolist(),
         **evac_report,
         "roc_curve": str(roc_path),
+        "confusion_matrices": str(confusion_path),
         "fire_spread_map": str(map_path),
     }
+
 
     summary_path = args.output_dir / "summary_metrics.json"
     pd.Series(summary).to_json(summary_path, indent=2)
@@ -416,6 +467,7 @@ def main() -> None:
     print("Run complete. Outputs:")
     print(f"- {roc_path}")
     print(f"- {map_path}")
+    print(f"- {confusion_path}")
     print(f"- {summary_path}")
 
 
