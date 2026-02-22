@@ -287,22 +287,37 @@ def ecological_risk(population_nodes: Dict[Tuple[int, int], int], risk_map: np.n
     return float(sum(pop * risk_map[node] for node, pop in population_nodes.items()))
 
 
+def evacuation_routes(
+    risk_map: np.ndarray,
+    populations: Dict[Tuple[int, int], int],
+    safe_nodes: Sequence[Tuple[int, int]],
+) -> Tuple[Dict[Tuple[int, int], List[Tuple[int, int]]], Dict[Tuple[int, int], List[Tuple[int, int]]]]:
+    rows, cols = risk_map.shape
+    g = build_spatial_graph(rows, cols)
+
+    baseline_paths = {}
+    quantum_paths = {}
+    for node in populations:
+        baseline_paths[node] = baseline_route(g, node, safe_nodes)
+        quantum_paths[node] = quantum_inspired_route(g, node, safe_nodes, risk_map)
+
+    return baseline_paths, quantum_paths
+
+
 def simulate_evacuation(
     risk_map: np.ndarray,
     populations: Dict[Tuple[int, int], int],
     safe_nodes: Sequence[Tuple[int, int]],
 ) -> Dict[str, float]:
-    rows, cols = risk_map.shape
-    g = build_spatial_graph(rows, cols)
-
     pre_risk = ecological_risk(populations, risk_map)
+    baseline_paths, quantum_paths = evacuation_routes(risk_map, populations, safe_nodes)
 
     moved_baseline = {}
     moved_quantum = {}
 
     for node, pop in populations.items():
-        bpath = baseline_route(g, node, safe_nodes)
-        qpath = quantum_inspired_route(g, node, safe_nodes, risk_map)
+        bpath = baseline_paths[node]
+        qpath = quantum_paths[node]
         moved_baseline[bpath[-1]] = moved_baseline.get(bpath[-1], 0) + pop
         moved_quantum[qpath[-1]] = moved_quantum.get(qpath[-1], 0) + pop
 
@@ -332,27 +347,61 @@ def plot_roc_curves(metrics: Dict[str, Dict[str, np.ndarray | float]], out_path:
     plt.close()
 
 
-def plot_confusion_matrices(metrics: Dict[str, Dict[str, np.ndarray | float]], out_path: Path) -> None:
-    model_names = list(metrics.keys())
-    n = len(model_names)
-    fig, axes = plt.subplots(1, n, figsize=(4.0 * n, 3.8), squeeze=False)
-    axes = axes.ravel()
+def plot_confusion_matrix(cm: np.ndarray, title: str, out_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(4.2, 3.8))
+    im = ax.imshow(cm, cmap="Blues")
+    ax.set_title(title)
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Actual")
+    ax.set_xticks([0, 1])
+    ax.set_yticks([0, 1])
 
-    for ax, name in zip(axes, model_names):
-        cm = np.array(metrics[name]["confusion_matrix"])
-        im = ax.imshow(cm, cmap="Blues")
-        ax.set_title(name)
-        ax.set_xlabel("Predicted")
-        ax.set_ylabel("Actual")
-        ax.set_xticks([0, 1])
-        ax.set_yticks([0, 1])
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, f"{cm[i, j]}", ha="center", va="center", color="black")
 
-        for i in range(cm.shape[0]):
-            for j in range(cm.shape[1]):
-                ax.text(j, i, f"{cm[i, j]}", ha="center", va="center", color="black")
-
-    fig.colorbar(im, ax=axes.tolist(), fraction=0.03, pad=0.04)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close(fig)
+
+
+def plot_evacuation_routes(
+    risk_map: np.ndarray,
+    populations: Dict[Tuple[int, int], int],
+    safe_nodes: Sequence[Tuple[int, int]],
+    baseline_paths: Dict[Tuple[int, int], List[Tuple[int, int]]],
+    quantum_paths: Dict[Tuple[int, int], List[Tuple[int, int]]],
+    out_path: Path,
+) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True, sharey=True)
+
+    for ax, title, paths in [
+        (axes[0], "Baseline Evacuation Routes", baseline_paths),
+        (axes[1], "Quantum-Inspired Evacuation Routes", quantum_paths),
+    ]:
+        ax.imshow(risk_map, cmap="hot", vmin=0, vmax=1, alpha=0.8)
+        for start, path in paths.items():
+            rows = [pt[0] for pt in path]
+            cols = [pt[1] for pt in path]
+            ax.plot(cols, rows, color="cyan", linewidth=1.6, alpha=0.9)
+            ax.scatter(start[1], start[0], color="white", s=20, edgecolor="black", linewidth=0.5)
+
+        safe_cols = [n[1] for n in safe_nodes]
+        safe_rows = [n[0] for n in safe_nodes]
+        ax.scatter(safe_cols, safe_rows, color="lime", marker="s", s=36, label="Safe nodes")
+
+        ax.set_title(title)
+        ax.set_xlabel("Grid column")
+        ax.set_ylabel("Grid row")
+
+    handles = [
+        plt.Line2D([0], [0], color="cyan", lw=2, label="Route"),
+        plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="white", markeredgecolor="black", lw=0, label="Population start"),
+        plt.Line2D([0], [0], marker="s", color="lime", lw=0, label="Safe node"),
+    ]
+    fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False)
+    fig.tight_layout(rect=[0, 0.08, 1, 1])
     plt.savefig(out_path)
     plt.close(fig)
 
@@ -413,10 +462,16 @@ def main() -> None:
     preds = multi_day_forecast(qmodel, seed_day, horizon=args.horizon_days)
 
     roc_path = args.output_dir / "roc_curve.png"
-    confusion_path = args.output_dir / "confusion_matrices.png"
+    confusion_dir = args.output_dir / "confusion_matrices"
+    confusion_dir.mkdir(parents=True, exist_ok=True)
     map_path = args.output_dir / "fire_spread_maps.png"
     plot_roc_curves(metrics, roc_path)
-    plot_confusion_matrices(metrics, confusion_path)
+    confusion_paths = {}
+    for model_name, m in metrics.items():
+        model_confusion_path = confusion_dir / f"{model_name}_confusion_matrix.png"
+        plot_confusion_matrix(np.array(m["confusion_matrix"]), f"{model_name} Confusion Matrix", model_confusion_path)
+        confusion_paths[model_name] = str(model_confusion_path)
+
     plot_fire_spread_maps(actual=tensor[-1], predicted_maps=preds, out_path=map_path)
 
     # Example wildlife populations on high-risk cells and edge safe nodes
@@ -425,7 +480,17 @@ def main() -> None:
     pop_nodes = {(int(i // grid.cols), int(i % grid.cols)): 30 for i in flat_idx}
     safe_nodes = [(0, c) for c in range(0, grid.cols, 5)] + [(grid.rows - 1, c) for c in range(0, grid.cols, 5)]
 
+    baseline_paths, quantum_paths = evacuation_routes(last_risk, pop_nodes, safe_nodes)
     evac_report = simulate_evacuation(last_risk, pop_nodes, safe_nodes)
+    evacuation_map_path = args.output_dir / "evacuation_routes.png"
+    plot_evacuation_routes(
+        risk_map=last_risk,
+        populations=pop_nodes,
+        safe_nodes=safe_nodes,
+        baseline_paths=baseline_paths,
+        quantum_paths=quantum_paths,
+        out_path=evacuation_map_path,
+    )
 
     summary = {
         "n_days": len(days),
@@ -456,8 +521,9 @@ def main() -> None:
         "quantum_confusion_matrix": metrics["quantum_inspired"]["confusion_matrix"].tolist(),
         **evac_report,
         "roc_curve": str(roc_path),
-        "confusion_matrices": str(confusion_path),
+        "confusion_matrices": confusion_paths,
         "fire_spread_map": str(map_path),
+        "evacuation_route_map": str(evacuation_map_path),
     }
 
 
@@ -467,7 +533,10 @@ def main() -> None:
     print("Run complete. Outputs:")
     print(f"- {roc_path}")
     print(f"- {map_path}")
-    print(f"- {confusion_path}")
+    print("- confusion matrices:")
+    for name, path in confusion_paths.items():
+        print(f"  - {name}: {path}")
+    print(f"- {evacuation_map_path}")
     print(f"- {summary_path}")
 
 
