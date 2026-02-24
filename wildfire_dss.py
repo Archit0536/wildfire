@@ -20,6 +20,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from ca_algorithms import DeterministicCAModel, PersistenceCAModel
+from tree_baselines import evaluate_tree_baselines_multiseed_cv
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import auc, confusion_matrix, f1_score, log_loss, precision_score, recall_score, roc_curve
 from sklearn.model_selection import train_test_split
@@ -454,6 +455,7 @@ def main() -> None:
 
     x, y = build_features_targets(tensor)
     metrics = evaluate_models(x, y)
+    tree_cv_metrics = evaluate_tree_baselines_multiseed_cv(x, y, seeds=(0, 1, 2, 3, 4), n_splits=5)
 
     qmodel = QuantumInspiredSpreadModel()
     qmodel.fit(x, y)
@@ -519,6 +521,12 @@ def main() -> None:
         "quantum_f1": metrics["quantum_inspired"]["f1"],
         "quantum_loss": metrics["quantum_inspired"]["loss"],
         "quantum_confusion_matrix": metrics["quantum_inspired"]["confusion_matrix"].tolist(),
+        "random_forest_cv": tree_cv_metrics["random_forest"],
+        "random_forest_auc_mean_pm_std": f"{tree_cv_metrics['random_forest']['auc_mean']:.4f} ± {tree_cv_metrics['random_forest']['auc_std']:.4f}",
+        **({
+            "xgboost_cv": tree_cv_metrics["xgboost"],
+            "xgboost_auc_mean_pm_std": f"{tree_cv_metrics['xgboost']['auc_mean']:.4f} ± {tree_cv_metrics['xgboost']['auc_std']:.4f}",
+        } if "xgboost" in tree_cv_metrics else {"xgboost_cv": "xgboost_not_installed"}),
         **evac_report,
         "roc_curve": str(roc_path),
         "confusion_matrices": confusion_paths,
@@ -537,6 +545,11 @@ def main() -> None:
     for name, path in confusion_paths.items():
         print(f"  - {name}: {path}")
     print(f"- {evacuation_map_path}")
+    print(f"- RandomForest 5-seed CV AUC: {tree_cv_metrics['random_forest']['auc_mean']:.4f} ± {tree_cv_metrics['random_forest']['auc_std']:.4f}")
+    if "xgboost" in tree_cv_metrics:
+        print(f"- XGBoost 5-seed CV AUC: {tree_cv_metrics['xgboost']['auc_mean']:.4f} ± {tree_cv_metrics['xgboost']['auc_std']:.4f}")
+    else:
+        print("- XGBoost 5-seed CV AUC: unavailable (xgboost not installed)")
     print(f"- {summary_path}")
 
 
