@@ -20,7 +20,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from ca_algorithms import DeterministicCAModel, PersistenceCAModel
-from tree_baselines import evaluate_tree_baselines_multiseed_cv
+from tree_baselines import evaluate_tree_baselines_holdout, evaluate_tree_baselines_multiseed_cv
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import auc, confusion_matrix, f1_score, log_loss, precision_score, recall_score, roc_curve
 from sklearn.model_selection import train_test_split
@@ -348,6 +348,32 @@ def plot_roc_curves(metrics: Dict[str, Dict[str, np.ndarray | float]], out_path:
     plt.close()
 
 
+def plot_quantum_vs_ml_roc(
+    quantum_metrics: Dict[str, np.ndarray | float],
+    ml_metrics: Dict[str, Dict[str, np.ndarray | float]],
+    out_path: Path,
+) -> None:
+    plt.figure(figsize=(7, 5))
+    plt.plot(
+        quantum_metrics["fpr"],
+        quantum_metrics["tpr"],
+        label=f"quantum_inspired AUC={quantum_metrics['auc']:.3f}",
+        linewidth=2.2,
+    )
+
+    for model_name, metrics in ml_metrics.items():
+        plt.plot(metrics["fpr"], metrics["tpr"], label=f"{model_name} AUC={metrics['auc']:.3f}")
+
+    plt.plot([0, 1], [0, 1], "k--", alpha=0.5)
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("Quantum ROC vs ML Model ROC")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+
 def plot_confusion_matrix(cm: np.ndarray, title: str, out_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(4.2, 3.8))
     im = ax.imshow(cm, cmap="Blues")
@@ -456,6 +482,23 @@ def main() -> None:
     x, y = build_features_targets(tensor)
     metrics = evaluate_models(x, y)
     tree_cv_metrics = evaluate_tree_baselines_multiseed_cv(x, y, seeds=(0, 1, 2, 3, 4), n_splits=5)
+    from sklearn.model_selection import train_test_split
+
+    x_train, x_test, y_train, y_test = train_test_split(
+        x,
+        y,
+        test_size=0.3,
+        random_state=42,
+        stratify=y
+    )
+
+    ml_holdout_metrics = evaluate_tree_baselines_holdout(
+        x_train,
+        y_train,
+        x_test,
+        y_test,
+        seed=42
+    )
 
     qmodel = QuantumInspiredSpreadModel()
     qmodel.fit(x, y)
@@ -464,12 +507,18 @@ def main() -> None:
     preds = multi_day_forecast(qmodel, seed_day, horizon=args.horizon_days)
 
     roc_path = args.output_dir / "roc_curve.png"
+    quantum_vs_ml_roc_path = args.output_dir / "quantum_vs_ml_roc_curve.png"
     confusion_dir = args.output_dir / "confusion_matrices"
     confusion_dir.mkdir(parents=True, exist_ok=True)
     map_path = args.output_dir / "fire_spread_maps.png"
     plot_roc_curves(metrics, roc_path)
+    plot_quantum_vs_ml_roc(metrics["quantum_inspired"], ml_holdout_metrics, quantum_vs_ml_roc_path)
     confusion_paths = {}
     for model_name, m in metrics.items():
+        model_confusion_path = confusion_dir / f"{model_name}_confusion_matrix.png"
+        plot_confusion_matrix(np.array(m["confusion_matrix"]), f"{model_name} Confusion Matrix", model_confusion_path)
+        confusion_paths[model_name] = str(model_confusion_path)
+    for model_name, m in ml_holdout_metrics.items():
         model_confusion_path = confusion_dir / f"{model_name}_confusion_matrix.png"
         plot_confusion_matrix(np.array(m["confusion_matrix"]), f"{model_name} Confusion Matrix", model_confusion_path)
         confusion_paths[model_name] = str(model_confusion_path)
@@ -522,13 +571,18 @@ def main() -> None:
         "quantum_loss": metrics["quantum_inspired"]["loss"],
         "quantum_confusion_matrix": metrics["quantum_inspired"]["confusion_matrix"].tolist(),
         "random_forest_cv": tree_cv_metrics["random_forest"],
+        "random_forest_holdout_auc": ml_holdout_metrics["random_forest"]["auc"],
+        "random_forest_holdout_confusion_matrix": ml_holdout_metrics["random_forest"]["confusion_matrix"].tolist(),
         "random_forest_auc_mean_pm_std": f"{tree_cv_metrics['random_forest']['auc_mean']:.4f} ± {tree_cv_metrics['random_forest']['auc_std']:.4f}",
         **({
             "xgboost_cv": tree_cv_metrics["xgboost"],
+            "xgboost_holdout_auc": ml_holdout_metrics["xgboost"]["auc"],
+            "xgboost_holdout_confusion_matrix": ml_holdout_metrics["xgboost"]["confusion_matrix"].tolist(),
             "xgboost_auc_mean_pm_std": f"{tree_cv_metrics['xgboost']['auc_mean']:.4f} ± {tree_cv_metrics['xgboost']['auc_std']:.4f}",
         } if "xgboost" in tree_cv_metrics else {"xgboost_cv": "xgboost_not_installed"}),
         **evac_report,
         "roc_curve": str(roc_path),
+        "quantum_vs_ml_roc_curve": str(quantum_vs_ml_roc_path),
         "confusion_matrices": confusion_paths,
         "fire_spread_map": str(map_path),
         "evacuation_route_map": str(evacuation_map_path),
@@ -540,6 +594,7 @@ def main() -> None:
 
     print("Run complete. Outputs:")
     print(f"- {roc_path}")
+    print(f"- {quantum_vs_ml_roc_path}")
     print(f"- {map_path}")
     print("- confusion matrices:")
     for name, path in confusion_paths.items():
