@@ -117,3 +117,44 @@ def evaluate_tree_baselines_multiseed_cv(
             summary[model_name][f"{metric_name}_std"] = float(arr.std(ddof=1))
 
     return summary
+
+
+def evaluate_tree_baselines_holdout(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    seed: int = 42,
+) -> Dict[str, Dict[str, np.ndarray | float]]:
+    """Evaluate tree-based baselines on a fixed holdout split.
+
+    Returns ROC arrays and confusion matrices for direct model comparison plots.
+    """
+    out: Dict[str, Dict[str, np.ndarray | float]] = {}
+
+    rf_model = RandomForestSpreadModel(random_state=seed)
+    rf_model.fit(x_train, y_train)
+    rf_scores = rf_model.predict_proba(x_test)
+    rf_preds = (rf_scores >= 0.5).astype(int)
+    rf_fpr, rf_tpr, _ = sklearn.metrics.roc_curve(y_test, rf_scores)
+    out["random_forest"] = {
+        "fpr": rf_fpr,
+        "tpr": rf_tpr,
+        "auc": float(sklearn.metrics.auc(rf_fpr, rf_tpr)),
+        "confusion_matrix": sklearn.metrics.confusion_matrix(y_test, rf_preds, labels=[0, 1]),
+    }
+
+    if XGBClassifier is not None:
+        xgb_model = XGBoostSpreadModel(random_state=seed)
+        xgb_model.fit(x_train, y_train)
+        xgb_scores = xgb_model.predict_proba(x_test)
+        xgb_preds = (xgb_scores >= 0.5).astype(int)
+        xgb_fpr, xgb_tpr, _ = sklearn.metrics.roc_curve(y_test, xgb_scores)
+        out["xgboost"] = {
+            "fpr": xgb_fpr,
+            "tpr": xgb_tpr,
+            "auc": float(sklearn.metrics.auc(xgb_fpr, xgb_tpr)),
+            "confusion_matrix": sklearn.metrics.confusion_matrix(y_test, xgb_preds, labels=[0, 1]),
+        }
+
+    return out
