@@ -238,6 +238,36 @@ def build_spatial_graph(rows: int, cols: int) -> nx.Graph:
     return g
 
 
+def select_dynamic_safe_nodes(
+    risk_map: np.ndarray,
+    n_safe_nodes: int = 12,
+    boundary_bias: float = 0.2,
+) -> List[Tuple[int, int]]:
+    """Select low-risk refuge cells dynamically from the current risk map.
+
+    Prioritizes low-risk boundary cells while still allowing interior refuges if needed.
+    """
+    rows, cols = risk_map.shape
+    candidates = []
+    for r in range(rows):
+        for c in range(cols):
+            is_boundary = int(r in (0, rows - 1) or c in (0, cols - 1))
+            score = float(risk_map[r, c] - boundary_bias * is_boundary)
+            candidates.append(((r, c), score))
+
+    candidates.sort(key=lambda item: item[1])
+
+    selected: List[Tuple[int, int]] = []
+    min_gap = max(1, min(rows, cols) // 8)
+    for node, _ in candidates:
+        if all(abs(node[0] - r2) + abs(node[1] - c2) >= min_gap for r2, c2 in selected):
+            selected.append(node)
+        if len(selected) >= n_safe_nodes:
+            break
+
+    return selected if selected else [(0, 0)]
+
+
 def route_cost(path: Sequence[Tuple[int, int]], risk_map: np.ndarray) -> float:
     return float(sum(risk_map[r, c] for r, c in path))
 
@@ -303,6 +333,63 @@ def evacuation_routes(
         quantum_paths[node] = quantum_inspired_route(g, node, safe_nodes, risk_map)
 
     return baseline_paths, quantum_paths
+
+
+def simulate_dynamic_evacuation(
+    risk_forecast: Sequence[np.ndarray],
+    populations: Dict[Tuple[int, int], int],
+    safe_nodes: Sequence[Tuple[int, int]],
+) -> Dict[str, float]:
+    """Day-by-day adaptive evacuation that re-routes as risk evolves."""
+    g = build_spatial_graph(*risk_forecast[0].shape)
+    baseline_positions = populations.copy()
+    quantum_positions = populations.copy()
+
+    pre_risk = ecological_risk(populations, risk_forecast[0])
+    cumulative_baseline_risk = 0.0
+    cumulative_quantum_risk = 0.0
+
+    for day_risk in risk_forecast:
+        cumulative_baseline_risk += ecological_risk(baseline_positions, day_risk)
+        cumulative_quantum_risk += ecological_risk(quantum_positions, day_risk)
+
+        next_baseline: Dict[Tuple[int, int], int] = {}
+        next_quantum: Dict[Tuple[int, int], int] = {}
+
+        for node, pop in baseline_positions.items():
+            if node in safe_nodes:
+                next_baseline[node] = next_baseline.get(node, 0) + pop
+                continue
+            path = baseline_route(g, node, safe_nodes)
+            moved = path[1] if len(path) > 1 else path[0]
+            next_baseline[moved] = next_baseline.get(moved, 0) + pop
+
+        for node, pop in quantum_positions.items():
+            if node in safe_nodes:
+                next_quantum[node] = next_quantum.get(node, 0) + pop
+                continue
+            path = quantum_inspired_route(g, node, safe_nodes, day_risk)
+            moved = path[1] if len(path) > 1 else path[0]
+            next_quantum[moved] = next_quantum.get(moved, 0) + pop
+
+        baseline_positions = next_baseline
+        quantum_positions = next_quantum
+
+    horizon = max(len(risk_forecast), 1)
+    baseline_post = ecological_risk(baseline_positions, risk_forecast[-1])
+    quantum_post = ecological_risk(quantum_positions, risk_forecast[-1])
+
+    return {
+        "pre_risk": pre_risk,
+        "baseline_post": baseline_post,
+        "quantum_post": quantum_post,
+        "baseline_reduction_pct": 100 * (pre_risk - baseline_post) / (pre_risk + 1e-6),
+        "quantum_reduction_pct": 100 * (pre_risk - quantum_post) / (pre_risk + 1e-6),
+        "baseline_cumulative_risk": cumulative_baseline_risk,
+        "quantum_cumulative_risk": cumulative_quantum_risk,
+        "baseline_avg_daily_risk": cumulative_baseline_risk / horizon,
+        "quantum_avg_daily_risk": cumulative_quantum_risk / horizon,
+    }
 
 
 def simulate_evacuation(
@@ -525,14 +612,13 @@ def main() -> None:
 
     plot_fire_spread_maps(actual=tensor[-1], predicted_maps=preds, out_path=map_path)
 
-    # Example wildlife populations on high-risk cells and edge safe nodes
+    # Dynamic evacuation setup from forecasted risk and high-risk source cells.
     last_risk = preds[0]
     flat_idx = np.argsort(last_risk.reshape(-1))[-20:]
     pop_nodes = {(int(i // grid.cols), int(i % grid.cols)): 30 for i in flat_idx}
-    safe_nodes = [(0, c) for c in range(0, grid.cols, 5)] + [(grid.rows - 1, c) for c in range(0, grid.cols, 5)]
-
+    safe_nodes = select_dynamic_safe_nodes(last_risk, n_safe_nodes=12)
     baseline_paths, quantum_paths = evacuation_routes(last_risk, pop_nodes, safe_nodes)
-    evac_report = simulate_evacuation(last_risk, pop_nodes, safe_nodes)
+    evac_report = simulate_dynamic_evacuation(preds, pop_nodes, safe_nodes)
     evacuation_map_path = args.output_dir / "evacuation_routes.png"
     plot_evacuation_routes(
         risk_map=last_risk,
