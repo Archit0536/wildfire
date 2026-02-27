@@ -340,8 +340,13 @@ def simulate_dynamic_evacuation(
     populations: Dict[Tuple[int, int], int],
     safe_nodes: Sequence[Tuple[int, int]],
     traversal_output_dir: Path | None = None,
+    max_steps: int | None = None,
 ) -> Dict[str, float]:
-    """Day-by-day adaptive evacuation that re-routes as risk evolves."""
+    """Day-by-day adaptive evacuation that re-routes as risk evolves.
+
+    Continues beyond forecast horizon (using the final risk map) until all clusters
+    reach safe nodes or max_steps is reached.
+    """
     g = build_spatial_graph(*risk_forecast[0].shape)
     baseline_positions = populations.copy()
     quantum_positions = populations.copy()
@@ -351,8 +356,17 @@ def simulate_dynamic_evacuation(
     cumulative_quantum_risk = 0.0
 
     traversal_frames = 0
+    step_idx = 0
+    effective_max_steps = max_steps if max_steps is not None else max(len(risk_forecast) * 6, 30)
 
-    for step_idx, day_risk in enumerate(risk_forecast, start=1):
+    while step_idx < effective_max_steps:
+        all_baseline_safe = all(node in safe_nodes for node in baseline_positions)
+        all_quantum_safe = all(node in safe_nodes for node in quantum_positions)
+        if all_baseline_safe and all_quantum_safe:
+            break
+
+        step_idx += 1
+        day_risk = risk_forecast[min(step_idx - 1, len(risk_forecast) - 1)]
         cumulative_baseline_risk += ecological_risk(baseline_positions, day_risk)
         cumulative_quantum_risk += ecological_risk(quantum_positions, day_risk)
 
@@ -391,9 +405,10 @@ def simulate_dynamic_evacuation(
         baseline_positions = next_baseline
         quantum_positions = next_quantum
 
-    horizon = max(len(risk_forecast), 1)
-    baseline_post = ecological_risk(baseline_positions, risk_forecast[-1])
-    quantum_post = ecological_risk(quantum_positions, risk_forecast[-1])
+    horizon = max(step_idx, 1)
+    final_risk = risk_forecast[-1]
+    baseline_post = ecological_risk(baseline_positions, final_risk)
+    quantum_post = ecological_risk(quantum_positions, final_risk)
 
     return {
         "pre_risk": pre_risk,
@@ -406,6 +421,86 @@ def simulate_dynamic_evacuation(
         "baseline_avg_daily_risk": cumulative_baseline_risk / horizon,
         "quantum_avg_daily_risk": cumulative_quantum_risk / horizon,
         "traversal_frames": traversal_frames,
+        "evacuation_steps_executed": step_idx,
+        "evacuation_max_steps": effective_max_steps,
+        "baseline_reached_safe_state": all(node in safe_nodes for node in baseline_positions),
+        "quantum_reached_safe_state": all(node in safe_nodes for node in quantum_positions),
+    }
+
+
+def generate_steps_to_safe_state(
+    risk_forecast: Sequence[np.ndarray],
+    populations: Dict[Tuple[int, int], int],
+    safe_nodes: Sequence[Tuple[int, int]],
+    max_steps: int | None = None,
+) -> Dict[str, object]:
+    """Generate all movement steps until populations reach a safe state.
+
+    Safe state means all population mass is located on safe nodes.
+    """
+    g = build_spatial_graph(*risk_forecast[0].shape)
+    baseline_positions = populations.copy()
+    quantum_positions = populations.copy()
+
+    steps: List[Dict[str, object]] = []
+
+    def serialize_positions(position_map: Dict[Tuple[int, int], int]) -> Dict[str, int]:
+        return {f"{r},{c}": int(pop) for (r, c), pop in sorted(position_map.items())}
+
+    effective_max_steps = max_steps if max_steps is not None else max(len(risk_forecast) * 6, 30)
+    for step_idx in range(1, effective_max_steps + 1):
+        day_risk = risk_forecast[min(step_idx - 1, len(risk_forecast) - 1)]
+
+        all_baseline_safe = all(node in safe_nodes for node in baseline_positions)
+        all_quantum_safe = all(node in safe_nodes for node in quantum_positions)
+        if all_baseline_safe and all_quantum_safe:
+            break
+
+        baseline_moves = []
+        quantum_moves = []
+        next_baseline: Dict[Tuple[int, int], int] = {}
+        next_quantum: Dict[Tuple[int, int], int] = {}
+
+        for node, pop in baseline_positions.items():
+            if node in safe_nodes:
+                moved = node
+            else:
+                path = baseline_route(g, node, safe_nodes)
+                moved = path[1] if len(path) > 1 else path[0]
+            next_baseline[moved] = next_baseline.get(moved, 0) + pop
+            baseline_moves.append({"from": [node[0], node[1]], "to": [moved[0], moved[1]], "population": int(pop)})
+
+        for node, pop in quantum_positions.items():
+            if node in safe_nodes:
+                moved = node
+            else:
+                path = quantum_inspired_route(g, node, safe_nodes, day_risk)
+                moved = path[1] if len(path) > 1 else path[0]
+            next_quantum[moved] = next_quantum.get(moved, 0) + pop
+            quantum_moves.append({"from": [node[0], node[1]], "to": [moved[0], moved[1]], "population": int(pop)})
+
+        baseline_positions = next_baseline
+        quantum_positions = next_quantum
+
+        steps.append(
+            {
+                "step": step_idx,
+                "baseline_moves": baseline_moves,
+                "quantum_moves": quantum_moves,
+                "baseline_positions": serialize_positions(baseline_positions),
+                "quantum_positions": serialize_positions(quantum_positions),
+                "baseline_all_safe": all(node in safe_nodes for node in baseline_positions),
+                "quantum_all_safe": all(node in safe_nodes for node in quantum_positions),
+            }
+        )
+
+    return {
+        "safe_nodes": [[r, c] for (r, c) in safe_nodes],
+        "steps": steps,
+        "baseline_reached_safe_state": all(node in safe_nodes for node in baseline_positions),
+        "quantum_reached_safe_state": all(node in safe_nodes for node in quantum_positions),
+        "total_steps_generated": len(steps),
+        "max_steps": effective_max_steps,
     }
 
 
@@ -613,6 +708,7 @@ def main() -> None:
     parser.add_argument("--firms_csv", type=Path, default=None)
     parser.add_argument("--output_dir", type=Path, default=Path("artifacts"))
     parser.add_argument("--horizon_days", type=int, default=5)
+    parser.add_argument("--max_evacuation_steps", type=int, default=60)
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -683,7 +779,16 @@ def main() -> None:
         pop_nodes,
         safe_nodes,
         traversal_output_dir=traversal_dir,
+        max_steps=args.max_evacuation_steps,
     )
+    safe_state_steps = generate_steps_to_safe_state(
+        preds,
+        pop_nodes,
+        safe_nodes,
+        max_steps=args.max_evacuation_steps,
+    )
+    safe_state_steps_path = args.output_dir / "safe_state_steps.json"
+    pd.Series(safe_state_steps).to_json(safe_state_steps_path, indent=2)
     evacuation_map_path = args.output_dir / "evacuation_routes.png"
     plot_evacuation_routes(
         risk_map=last_risk,
@@ -738,6 +843,10 @@ def main() -> None:
         "fire_spread_map": str(map_path),
         "evacuation_route_map": str(evacuation_map_path),
         "dynamic_traversal_dir": str(traversal_dir),
+        "safe_state_steps": str(safe_state_steps_path),
+        "safe_state_total_steps": safe_state_steps["total_steps_generated"],
+        "safe_state_baseline_reached": safe_state_steps["baseline_reached_safe_state"],
+        "safe_state_quantum_reached": safe_state_steps["quantum_reached_safe_state"],
     }
 
 
@@ -753,6 +862,7 @@ def main() -> None:
         print(f"  - {name}: {path}")
     print(f"- {evacuation_map_path}")
     print(f"- {traversal_dir} ({evac_report['traversal_frames']} frames)")
+    print(f"- {safe_state_steps_path} ({safe_state_steps['total_steps_generated']} steps)")
     print(f"- RandomForest 5-seed CV AUC: {tree_cv_metrics['random_forest']['auc_mean']:.4f} ± {tree_cv_metrics['random_forest']['auc_std']:.4f}")
     if "xgboost" in tree_cv_metrics:
         print(f"- XGBoost 5-seed CV AUC: {tree_cv_metrics['xgboost']['auc_mean']:.4f} ± {tree_cv_metrics['xgboost']['auc_std']:.4f}")
