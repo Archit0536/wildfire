@@ -339,6 +339,7 @@ def simulate_dynamic_evacuation(
     risk_forecast: Sequence[np.ndarray],
     populations: Dict[Tuple[int, int], int],
     safe_nodes: Sequence[Tuple[int, int]],
+    traversal_output_dir: Path | None = None,
 ) -> Dict[str, float]:
     """Day-by-day adaptive evacuation that re-routes as risk evolves."""
     g = build_spatial_graph(*risk_forecast[0].shape)
@@ -349,9 +350,24 @@ def simulate_dynamic_evacuation(
     cumulative_baseline_risk = 0.0
     cumulative_quantum_risk = 0.0
 
-    for day_risk in risk_forecast:
+    traversal_frames = 0
+
+    for step_idx, day_risk in enumerate(risk_forecast, start=1):
         cumulative_baseline_risk += ecological_risk(baseline_positions, day_risk)
         cumulative_quantum_risk += ecological_risk(quantum_positions, day_risk)
+
+        if traversal_output_dir is not None:
+            traversal_output_dir.mkdir(parents=True, exist_ok=True)
+            frame_path = traversal_output_dir / f"traversal_step_{step_idx:02d}.png"
+            plot_dynamic_traversal_step(
+                risk_map=day_risk,
+                baseline_positions=baseline_positions,
+                quantum_positions=quantum_positions,
+                safe_nodes=safe_nodes,
+                step_idx=step_idx,
+                out_path=frame_path,
+            )
+            traversal_frames += 1
 
         next_baseline: Dict[Tuple[int, int], int] = {}
         next_quantum: Dict[Tuple[int, int], int] = {}
@@ -389,6 +405,7 @@ def simulate_dynamic_evacuation(
         "quantum_cumulative_risk": cumulative_quantum_risk,
         "baseline_avg_daily_risk": cumulative_baseline_risk / horizon,
         "quantum_avg_daily_risk": cumulative_quantum_risk / horizon,
+        "traversal_frames": traversal_frames,
     }
 
 
@@ -520,6 +537,48 @@ def plot_evacuation_routes(
     plt.close(fig)
 
 
+
+def plot_dynamic_traversal_step(
+    risk_map: np.ndarray,
+    baseline_positions: Dict[Tuple[int, int], int],
+    quantum_positions: Dict[Tuple[int, int], int],
+    safe_nodes: Sequence[Tuple[int, int]],
+    step_idx: int,
+    out_path: Path,
+) -> None:
+    """Render a step-wise evacuation snapshot under the current fire risk map."""
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True, sharey=True)
+
+    for ax, title, positions in [
+        (axes[0], "Baseline dynamic traversal", baseline_positions),
+        (axes[1], "Quantum-inspired dynamic traversal", quantum_positions),
+    ]:
+        ax.imshow(risk_map, cmap="hot", vmin=0, vmax=1, alpha=0.85)
+
+        if positions:
+            total_pop = max(sum(positions.values()), 1)
+            rows = [node[0] for node in positions]
+            cols = [node[1] for node in positions]
+            sizes = [28 + 180 * (pop / total_pop) for pop in positions.values()]
+            ax.scatter(cols, rows, color="cyan", s=sizes, edgecolor="black", linewidth=0.5, alpha=0.9)
+
+        safe_cols = [n[1] for n in safe_nodes]
+        safe_rows = [n[0] for n in safe_nodes]
+        ax.scatter(safe_cols, safe_rows, color="lime", marker="s", s=44, label="Safe nodes")
+
+        ax.set_title(f"{title} - step {step_idx}")
+        ax.set_xlabel("Grid column")
+        ax.set_ylabel("Grid row")
+
+    handles = [
+        plt.Line2D([0], [0], marker="o", color="cyan", markeredgecolor="black", lw=0, label="Population position"),
+        plt.Line2D([0], [0], marker="s", color="lime", lw=0, label="Safe node"),
+    ]
+    fig.legend(handles=handles, loc="lower center", ncol=2, frameon=False)
+    fig.tight_layout(rect=[0, 0.08, 1, 1])
+    plt.savefig(out_path)
+    plt.close(fig)
+
 def plot_fire_spread_maps(
     actual: np.ndarray,
     predicted_maps: Sequence[np.ndarray],
@@ -618,7 +677,13 @@ def main() -> None:
     pop_nodes = {(int(i // grid.cols), int(i % grid.cols)): 30 for i in flat_idx}
     safe_nodes = select_dynamic_safe_nodes(last_risk, n_safe_nodes=12)
     baseline_paths, quantum_paths = evacuation_routes(last_risk, pop_nodes, safe_nodes)
-    evac_report = simulate_dynamic_evacuation(preds, pop_nodes, safe_nodes)
+    traversal_dir = args.output_dir / "dynamic_traversal"
+    evac_report = simulate_dynamic_evacuation(
+        preds,
+        pop_nodes,
+        safe_nodes,
+        traversal_output_dir=traversal_dir,
+    )
     evacuation_map_path = args.output_dir / "evacuation_routes.png"
     plot_evacuation_routes(
         risk_map=last_risk,
@@ -672,6 +737,7 @@ def main() -> None:
         "confusion_matrices": confusion_paths,
         "fire_spread_map": str(map_path),
         "evacuation_route_map": str(evacuation_map_path),
+        "dynamic_traversal_dir": str(traversal_dir),
     }
 
 
@@ -686,6 +752,7 @@ def main() -> None:
     for name, path in confusion_paths.items():
         print(f"  - {name}: {path}")
     print(f"- {evacuation_map_path}")
+    print(f"- {traversal_dir} ({evac_report['traversal_frames']} frames)")
     print(f"- RandomForest 5-seed CV AUC: {tree_cv_metrics['random_forest']['auc_mean']:.4f} ± {tree_cv_metrics['random_forest']['auc_std']:.4f}")
     if "xgboost" in tree_cv_metrics:
         print(f"- XGBoost 5-seed CV AUC: {tree_cv_metrics['xgboost']['auc_mean']:.4f} ± {tree_cv_metrics['xgboost']['auc_std']:.4f}")
