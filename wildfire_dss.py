@@ -20,10 +20,18 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from ca_algorithms import DeterministicCAModel, PersistenceCAModel
-from tree_baselines import evaluate_tree_baselines_holdout, evaluate_tree_baselines_multiseed_cv
+from tree_baselines import (
+    XGBClassifier,
+    RandomForestSpreadModel,
+    XGBoostSpreadModel,
+    evaluate_tree_baselines_holdout,
+    evaluate_tree_baselines_multiseed_cv,
+)
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import auc, confusion_matrix, f1_score, log_loss, precision_score, recall_score, roc_curve
 from sklearn.model_selection import train_test_split
+
+from ml_evacuationn import build_tree_model_risk_maps, evacuation_routes_for_maps, plot_tree_evacuation_routes
 
 
 @dataclass
@@ -724,7 +732,7 @@ def main() -> None:
     x, y = build_features_targets(tensor)
     metrics = evaluate_models(x, y)
     tree_cv_metrics = evaluate_tree_baselines_multiseed_cv(x, y, seeds=(0, 1, 2, 3, 4), n_splits=5)
-    from sklearn.model_selection import train_test_split
+
 
     x_train, x_test, y_train, y_test = train_test_split(
         x,
@@ -772,6 +780,29 @@ def main() -> None:
     flat_idx = np.argsort(last_risk.reshape(-1))[-20:]
     pop_nodes = {(int(i // grid.cols), int(i % grid.cols)): 30 for i in flat_idx}
     safe_nodes = select_dynamic_safe_nodes(last_risk, n_safe_nodes=12)
+
+    rf_spread_model = RandomForestSpreadModel(random_state=42)
+    rf_spread_model.fit(x, y)
+    xgb_spread_model = None
+    if XGBClassifier is not None:
+        xgb_spread_model = XGBoostSpreadModel(random_state=42)
+        xgb_spread_model.fit(x, y)
+
+    tree_risk_maps = build_tree_model_risk_maps(
+        day_grid=seed_day,
+        random_forest_model=rf_spread_model,
+        xgboost_model=xgb_spread_model,
+    )
+    tree_routes = evacuation_routes_for_maps(tree_risk_maps, pop_nodes, safe_nodes)
+    tree_evacuation_map_path = args.output_dir / "tree_evacuation_routes.png"
+    plot_tree_evacuation_routes(
+        risk_maps=tree_risk_maps,
+        populations=pop_nodes,
+        safe_nodes=safe_nodes,
+        routes_by_model=tree_routes,
+        out_path=str(tree_evacuation_map_path),
+    )
+
     baseline_paths, quantum_paths = evacuation_routes(last_risk, pop_nodes, safe_nodes)
     traversal_dir = args.output_dir / "dynamic_traversal"
     evac_report = simulate_dynamic_evacuation(
@@ -842,6 +873,8 @@ def main() -> None:
         "confusion_matrices": confusion_paths,
         "fire_spread_map": str(map_path),
         "evacuation_route_map": str(evacuation_map_path),
+        "tree_evacuation_route_map": str(tree_evacuation_map_path),
+        "tree_risk_maps": {name: risk_map.tolist() for name, risk_map in tree_risk_maps.items()},
         "dynamic_traversal_dir": str(traversal_dir),
         "safe_state_steps": str(safe_state_steps_path),
         "safe_state_total_steps": safe_state_steps["total_steps_generated"],
@@ -861,6 +894,7 @@ def main() -> None:
     for name, path in confusion_paths.items():
         print(f"  - {name}: {path}")
     print(f"- {evacuation_map_path}")
+    print(f"- {tree_evacuation_map_path}")
     print(f"- {traversal_dir} ({evac_report['traversal_frames']} frames)")
     print(f"- {safe_state_steps_path} ({safe_state_steps['total_steps_generated']} steps)")
     print(f"- RandomForest 5-seed CV AUC: {tree_cv_metrics['random_forest']['auc_mean']:.4f} ± {tree_cv_metrics['random_forest']['auc_std']:.4f}")
