@@ -33,6 +33,7 @@ from sklearn.model_selection import train_test_split
 
 from ml_evacuationn import build_tree_model_risk_maps, evacuation_routes_for_maps, plot_tree_evacuation_routes
 
+DEFAULT_FIRMS_CSV = Path(__file__).with_name("fire_archive_SV-C2_716767.csv")
 
 @dataclass
 class GridSpec:
@@ -713,7 +714,7 @@ def plot_fire_spread_maps(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--firms_csv", type=Path, default=None)
+    parser.add_argument("--firms_csv", type=Path, default=DEFAULT_FIRMS_CSV)
     parser.add_argument("--output_dir", type=Path, default=Path("artifacts"))
     parser.add_argument("--horizon_days", type=int, default=5)
     parser.add_argument("--max_evacuation_steps", type=int, default=60)
@@ -721,10 +722,11 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.firms_csv and args.firms_csv.exists():
-        df = load_firms_csv(args.firms_csv)
-    else:
-        df = generate_synthetic_firms_data(n_days=25, points_per_day=900)
+    if not args.firms_csv.exists():
+        raise FileNotFoundError(
+            f"FIRMS CSV not found at {args.firms_csv}. Provide --firms_csv with a valid path."
+        )
+    df = load_firms_csv(args.firms_csv)
 
     grid = GridSpec(lat_min=32.5, lat_max=42.2, lon_min=-124.5, lon_max=-114.0, rows=28, cols=28)
     tensor, days = detections_to_grid(df, grid)
