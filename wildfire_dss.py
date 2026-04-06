@@ -31,6 +31,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import auc, confusion_matrix, f1_score, log_loss, precision_score, recall_score, roc_curve
 from sklearn.model_selection import train_test_split
 
+from animations import build_timestamp_accessible_points, render_fire_evacuation_gif
 from ml_evacuationn import build_tree_model_risk_maps, evacuation_routes_for_maps, plot_tree_evacuation_routes
 
 DEFAULT_FIRMS_CSV = Path(__file__).with_name("fire_archive_SV-C2_716767.csv")
@@ -282,11 +283,14 @@ def route_cost(path: Sequence[Tuple[int, int]], risk_map: np.ndarray) -> float:
 
 
 def baseline_route(g: nx.Graph, start: Tuple[int, int], safe_nodes: Sequence[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    def manhattan_heuristic(a: Tuple[int, int], b: Tuple[int, int]) -> float:
+        return float(abs(a[0] - b[0]) + abs(a[1] - b[1]))
+
     best_path = None
     best_len = float("inf")
     for sn in safe_nodes:
         try:
-            p = nx.shortest_path(g, start, sn, weight="distance")
+            p = nx.astar_path(g, start, sn, heuristic=manhattan_heuristic, weight="distance")
             if len(p) < best_len:
                 best_path = p
                 best_len = len(p)
@@ -822,6 +826,15 @@ def main() -> None:
     )
     safe_state_steps_path = args.output_dir / "safe_state_steps.json"
     pd.Series(safe_state_steps).to_json(safe_state_steps_path, indent=2)
+    timestamp_accessible_points = build_timestamp_accessible_points(risk_forecast=preds, safe_state_steps=safe_state_steps)
+    timestamp_accessible_points_path = args.output_dir / "timestamp_accessible_points.json"
+    pd.Series({"frames": timestamp_accessible_points}).to_json(timestamp_accessible_points_path, indent=2)
+    fire_evacuation_gif_path = args.output_dir / "fire_evacuation_overlap.gif"
+    render_fire_evacuation_gif(
+        risk_forecast=preds,
+        safe_state_steps=safe_state_steps,
+        out_path=fire_evacuation_gif_path,
+    )
     evacuation_map_path = args.output_dir / "evacuation_routes.png"
     plot_evacuation_routes(
         risk_map=last_risk,
@@ -899,6 +912,8 @@ def main() -> None:
     print(f"- {tree_evacuation_map_path}")
     print(f"- {traversal_dir} ({evac_report['traversal_frames']} frames)")
     print(f"- {safe_state_steps_path} ({safe_state_steps['total_steps_generated']} steps)")
+    print(f"- {timestamp_accessible_points_path}")
+    print(f"- {fire_evacuation_gif_path}")
     print(f"- RandomForest 5-seed CV AUC: {tree_cv_metrics['random_forest']['auc_mean']:.4f} ± {tree_cv_metrics['random_forest']['auc_std']:.4f}")
     if "xgboost" in tree_cv_metrics:
         print(f"- XGBoost 5-seed CV AUC: {tree_cv_metrics['xgboost']['auc_mean']:.4f} ± {tree_cv_metrics['xgboost']['auc_std']:.4f}")
