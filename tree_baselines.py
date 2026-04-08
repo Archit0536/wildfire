@@ -65,7 +65,8 @@ class XGBoostSpreadModel:
 
 
 def _compute_metrics(y_true: np.ndarray, scores: np.ndarray) -> Dict[str, float]:
-    preds = (scores >= 0.5).astype(int)
+    threshold = _select_f1_threshold(y_true, scores)
+    preds = (scores >= threshold).astype(int)
     fpr, tpr, _ = sklearn.metrics.roc_curve(y_true, scores)
     return {
         "auc": float(sklearn.metrics.auc(fpr, tpr)),
@@ -74,6 +75,25 @@ def _compute_metrics(y_true: np.ndarray, scores: np.ndarray) -> Dict[str, float]
         "f1": float(sklearn.metrics.f1_score(y_true, preds, zero_division=0)),
         "loss": float(sklearn.metrics.log_loss(y_true, np.clip(scores, 1e-6, 1 - 1e-6))),
     }
+
+
+def _select_f1_threshold(y_true: np.ndarray, scores: np.ndarray) -> float:
+    """Select threshold that maximizes F1 and then recall."""
+    candidate_thresholds = np.unique(np.clip(scores, 0.01, 0.99))
+    best_threshold = 0.5
+    best_f1 = -1.0
+    best_recall = -1.0
+
+    for threshold in candidate_thresholds:
+        preds = (scores >= threshold).astype(int)
+        f1 = float(sklearn.metrics.f1_score(y_true, preds, zero_division=0))
+        recall = float(sklearn.metrics.recall_score(y_true, preds, zero_division=0))
+        if f1 > best_f1 or (np.isclose(f1, best_f1) and recall > best_recall):
+            best_f1 = f1
+            best_recall = recall
+            best_threshold = float(threshold)
+
+    return best_threshold
 
 
 def evaluate_tree_baselines_multiseed_cv(
@@ -134,27 +154,31 @@ def evaluate_tree_baselines_holdout(
 
     rf_model = RandomForestSpreadModel(random_state=seed)
     rf_model.fit(x_train, y_train)
+    rf_threshold = _select_f1_threshold(y_train, rf_model.predict_proba(x_train))
     rf_scores = rf_model.predict_proba(x_test)
-    rf_preds = (rf_scores >= 0.5).astype(int)
+    rf_preds = (rf_scores >= rf_threshold).astype(int)
     rf_fpr, rf_tpr, _ = sklearn.metrics.roc_curve(y_test, rf_scores)
     out["random_forest"] = {
         "fpr": rf_fpr,
         "tpr": rf_tpr,
         "auc": float(sklearn.metrics.auc(rf_fpr, rf_tpr)),
         "confusion_matrix": sklearn.metrics.confusion_matrix(y_test, rf_preds, labels=[0, 1]),
+        "threshold": rf_threshold,
     }
 
     if XGBClassifier is not None:
         xgb_model = XGBoostSpreadModel(random_state=seed)
         xgb_model.fit(x_train, y_train)
+        xgb_threshold = _select_f1_threshold(y_train, xgb_model.predict_proba(x_train))
         xgb_scores = xgb_model.predict_proba(x_test)
-        xgb_preds = (xgb_scores >= 0.5).astype(int)
+        xgb_preds = (xgb_scores >= xgb_threshold).astype(int)
         xgb_fpr, xgb_tpr, _ = sklearn.metrics.roc_curve(y_test, xgb_scores)
         out["xgboost"] = {
             "fpr": xgb_fpr,
             "tpr": xgb_tpr,
             "auc": float(sklearn.metrics.auc(xgb_fpr, xgb_tpr)),
             "confusion_matrix": sklearn.metrics.confusion_matrix(y_test, xgb_preds, labels=[0, 1]),
+            "threshold": xgb_threshold,
         }
 
     return out
