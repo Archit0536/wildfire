@@ -172,7 +172,10 @@ class BaselineSpreadModel:
 
 class QuantumInspiredSpreadModel:
     def __init__(self) -> None:
-        self.model = LogisticRegression(max_iter=300)
+        self.model = LogisticRegression(
+            max_iter=300,
+            class_weight="balanced",
+        )
 
     def fit(self, x: np.ndarray, y: np.ndarray) -> None:
         z = quantum_feature_map(x)
@@ -181,6 +184,25 @@ class QuantumInspiredSpreadModel:
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
         z = quantum_feature_map(x)
         return self.model.predict_proba(z)[:, 1]
+
+
+def select_f1_threshold(y_true: np.ndarray, scores: np.ndarray) -> float:
+    """Pick a decision threshold that maximizes F1 and breaks ties by recall."""
+    candidate_thresholds = np.unique(np.clip(scores, 0.01, 0.99))
+    best_threshold = 0.5
+    best_f1 = -1.0
+    best_recall = -1.0
+
+    for threshold in candidate_thresholds:
+        preds = (scores >= threshold).astype(int)
+        f1 = float(f1_score(y_true, preds, zero_division=0))
+        recall = float(recall_score(y_true, preds, zero_division=0))
+        if f1 > best_f1 or (math.isclose(f1, best_f1) and recall > best_recall):
+            best_f1 = f1
+            best_recall = recall
+            best_threshold = float(threshold)
+
+    return best_threshold
 
 
 def evaluate_models(x: np.ndarray, y: np.ndarray) -> Dict[str, Dict[str, np.ndarray | float]]:
@@ -205,8 +227,10 @@ def evaluate_models(x: np.ndarray, y: np.ndarray) -> Dict[str, Dict[str, np.ndar
         "deterministic_ca": deterministic_ca,
         "quantum_inspired": qmodel,
     }.items():
+        train_scores = model.predict_proba(x_train)
+        threshold = select_f1_threshold(y_train, train_scores)
         scores = model.predict_proba(x_test)
-        preds = (scores >= 0.5).astype(int)
+        preds = (scores >= threshold).astype(int)
         fpr, tpr, _ = roc_curve(y_test, scores)
         out[name] = {
             "fpr": fpr,
@@ -218,6 +242,7 @@ def evaluate_models(x: np.ndarray, y: np.ndarray) -> Dict[str, Dict[str, np.ndar
             "precision": float(precision_score(y_test, preds, zero_division=0)),
             "recall": float(recall_score(y_test, preds, zero_division=0)),
             "f1": float(f1_score(y_test, preds, zero_division=0)),
+            "threshold": threshold,
             "loss": float(log_loss(y_test, np.clip(scores, 1e-6, 1 - 1e-6))),
         }
     return out
