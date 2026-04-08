@@ -21,10 +21,28 @@ def neighbor_sum(arr_2d: np.ndarray) -> np.ndarray:
 
 
 def _build_day_features(day_grid: np.ndarray) -> np.ndarray:
-    cur_norm = day_grid / (day_grid.max() + 1e-6)
-    neigh = neighbor_sum(day_grid)
+    from wildfire_dss import neighbor_sum  # or import correctly
+
+    cur = day_grid
+    cur_norm = cur / (cur.max() + 1e-6)
+
+    neigh = neighbor_sum(cur)
     neigh_norm = neigh / (neigh.max() + 1e-6)
-    return np.stack([cur_norm, neigh_norm], axis=-1).reshape(-1, 2)
+
+    # 🔥 Reconstruct missing features (same as training)
+    frp_norm = cur_norm
+    confidence_norm = np.clip(0.6 * cur_norm + 0.4 * neigh_norm, 0, 1)
+    wind_norm = np.clip(neigh_norm, 0, 1)
+
+    x = np.stack([
+        cur_norm,
+        neigh_norm,
+        frp_norm,
+        confidence_norm,
+        wind_norm
+    ], axis=-1)
+
+    return x.reshape(-1, 5)
 
 
 def predict_next_day_risk(model: object, day_grid: np.ndarray) -> np.ndarray:
