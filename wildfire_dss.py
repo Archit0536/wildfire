@@ -58,6 +58,14 @@ def load_firms_csv(csv_path: Path) -> pd.DataFrame:
         raise ValueError(f"Missing columns in FIRMS CSV: {missing}")
 
     df["acq_date"] = pd.to_datetime(df["acq_date"])
+    if "confidence" not in df.columns:
+        df["confidence"] = 50.0
+    if "frp" not in df.columns:
+        df["frp"] = 0.0
+    if "wind_speed" not in df.columns:
+        # Wind speed is often absent in FIRMS exports; use a deterministic proxy
+        # tied to fire intensity so the feature is always available.
+        df["wind_speed"] = np.clip(1.5 + 0.08 * np.sqrt(np.clip(df["frp"], 0, None)), 0, 25)
     return df
 
 
@@ -76,6 +84,7 @@ def generate_synthetic_firms_data(n_days: int = 20, points_per_day: int = 1000) 
         lons = rng.normal(drift_lon, 1.5, size=points_per_day)
         conf = rng.uniform(30, 100, size=points_per_day)
         frp = np.clip(rng.normal(35 + i, 15, size=points_per_day), 0, None)
+        wind_speed = np.clip(rng.normal(6 + 0.2 * i, 2.0, size=points_per_day), 0, None)
 
         day_df = pd.DataFrame(
             {
@@ -84,6 +93,7 @@ def generate_synthetic_firms_data(n_days: int = 20, points_per_day: int = 1000) 
                 "acq_date": day,
                 "confidence": conf,
                 "frp": frp,
+                "wind_speed": wind_speed,
             }
         )
         all_rows.append(day_df)
@@ -93,6 +103,12 @@ def generate_synthetic_firms_data(n_days: int = 20, points_per_day: int = 1000) 
 
 def detections_to_grid(df: pd.DataFrame, grid: GridSpec) -> Tuple[np.ndarray, pd.DatetimeIndex]:
     """Convert detections into [day, row, col] count tensor."""
+    features, days = detections_to_feature_grids(df, grid)
+    return features["fire_count"], days
+
+
+def detections_to_feature_grids(df: pd.DataFrame, grid: GridSpec) -> Tuple[Dict[str, np.ndarray], pd.DatetimeIndex]:
+    """Convert detections into per-day per-cell feature grids."""
     days = pd.DatetimeIndex(sorted(df["acq_date"].dt.normalize().unique()))
     day_to_idx = {d: i for i, d in enumerate(days)}
 
@@ -104,12 +120,47 @@ def detections_to_grid(df: pd.DataFrame, grid: GridSpec) -> Tuple[np.ndarray, pd
     col_ix = np.digitize(df["longitude"], lon_bins) - 1
 
     valid = (row_ix >= 0) & (row_ix < grid.rows) & (col_ix >= 0) & (col_ix < grid.cols)
-    tensor = np.zeros((len(days), grid.rows, grid.cols), dtype=np.float32)
+    tensors = {
+        "fire_count": np.zeros((len(days), grid.rows, grid.cols), dtype=np.float32),
+        "frp": np.zeros((len(days), grid.rows, grid.cols), dtype=np.float32),
+        "confidence": np.zeros((len(days), grid.rows, grid.cols), dtype=np.float32),
+        "wind_speed": np.zeros((len(days), grid.rows, grid.cols), dtype=np.float32),
+    }
 
-    for d, r, c in zip(day_ix[valid], row_ix[valid], col_ix[valid]):
-        tensor[d, r, c] += 1
+    # --- FRP (safe numeric conversion) ---
+    frp_series = df["frp"] if "frp" in df.columns else pd.Series(0.0, index=df.index)
+    frp_values = pd.to_numeric(frp_series, errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
 
-    return tensor, days
+# --- CONFIDENCE (handle 'l', 'n', 'h') ---
+    confidence_series = df["confidence"] if "confidence" in df.columns else pd.Series(50.0, index=df.index)
+
+    if confidence_series.dtype == object:
+        confidence_series = confidence_series.astype(str).str.lower().map({
+            "l": 30.0,
+            "n": 50.0,
+            "h": 90.0
+        })
+
+    confidence_values = pd.to_numeric(confidence_series, errors="coerce").fillna(50.0).to_numpy(dtype=np.float32)
+
+# --- WIND ---
+    wind_series = df["wind_speed"] if "wind_speed" in df.columns else pd.Series(0.0, index=df.index)
+    wind_values = pd.to_numeric(wind_series, errors="coerce").fillna(0.0).to_numpy(dtype=np.float32)
+
+    for d, r, c, frp, conf, wind in zip(
+        day_ix[valid],
+        row_ix[valid],
+        col_ix[valid],
+        frp_values[valid],
+        confidence_values[valid],
+        wind_values[valid],
+    ):
+        tensors["fire_count"][d, r, c] += 1
+        tensors["frp"][d, r, c] += frp
+        tensors["confidence"][d, r, c] += conf
+        tensors["wind_speed"][d, r, c] += wind
+
+    return tensors, days
 
 
 def neighbor_sum(arr_2d: np.ndarray) -> np.ndarray:
@@ -123,7 +174,12 @@ def neighbor_sum(arr_2d: np.ndarray) -> np.ndarray:
     return out
 
 
-def build_features_targets(tensor: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def build_features_targets(
+    tensor: np.ndarray,
+    frp_tensor: np.ndarray | None = None,
+    confidence_tensor: np.ndarray | None = None,
+    wind_speed_tensor: np.ndarray | None = None,
+) -> Tuple[np.ndarray, np.ndarray]:
     """Build X, y where X at day t predicts active-fire presence at t+1."""
     features = []
     targets = []
@@ -136,7 +192,19 @@ def build_features_targets(tensor: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         neigh = neighbor_sum(cur)
         neigh_norm = neigh / (neigh.max() + 1e-6)
 
-        x_t = np.stack([cur_norm, neigh_norm], axis=-1).reshape(-1, 2)
+        frp_norm = np.zeros_like(cur_norm) if frp_tensor is None else frp_tensor[t] / (frp_tensor[t].max() + 1e-6)
+        confidence_norm = (
+            np.zeros_like(cur_norm)
+            if confidence_tensor is None
+            else confidence_tensor[t] / (confidence_tensor[t].max() + 1e-6)
+        )
+        wind_norm = (
+            np.zeros_like(cur_norm)
+            if wind_speed_tensor is None
+            else wind_speed_tensor[t] / (wind_speed_tensor[t].max() + 1e-6)
+        )
+
+        x_t = np.stack([cur_norm, neigh_norm, frp_norm, confidence_norm, wind_norm], axis=-1).reshape(-1, 5)
         y_t = (nxt.reshape(-1) > 0).astype(int)
 
         features.append(x_t)
@@ -149,14 +217,23 @@ def quantum_feature_map(x: np.ndarray) -> np.ndarray:
     """Quantum-inspired nonlinear encoding using phase-like sinusoidal projections."""
     x1 = x[:, 0]
     x2 = x[:, 1]
+    frp = x[:, 2]
+    confidence = x[:, 3]
+    wind_speed = x[:, 4]
     return np.column_stack(
         [
             x1,
             x2,
+            frp,
+            confidence,
+            wind_speed,
             np.sin(math.pi * x1),
             np.cos(math.pi * x2),
             np.sin(2 * math.pi * x1 * x2),
             np.cos(2 * math.pi * (x1 - x2)),
+            np.sin(math.pi * frp * (0.5 + confidence)),
+            np.cos(math.pi * wind_speed * x2),
+            np.sin(2 * math.pi * confidence * wind_speed),
         ]
     )
 
@@ -252,8 +329,12 @@ def predict_risk_map_next_day(model: QuantumInspiredSpreadModel, day_grid: np.nd
     cur = day_grid
     cur_norm = cur / (cur.max() + 1e-6)
     neigh_norm = neighbor_sum(cur) / (neighbor_sum(cur).max() + 1e-6)
-    x = np.stack([cur_norm, neigh_norm], axis=-1).reshape(-1, 2)
+    frp_norm = cur_norm
+    confidence_norm = np.clip(0.6 * cur_norm + 0.4 * neigh_norm, 0, 1)
+    wind_norm = np.clip(neigh_norm, 0, 1)
+    x = np.stack([cur_norm, neigh_norm, frp_norm, confidence_norm, wind_norm], axis=-1).reshape(-1, 5)
     return model.predict_proba(x).reshape(day_grid.shape)
+
 
 
 def multi_day_forecast(model: QuantumInspiredSpreadModel, seed_grid: np.ndarray, horizon: int) -> List[np.ndarray]:
@@ -758,9 +839,15 @@ def main() -> None:
     df = load_firms_csv(args.firms_csv)
 
     grid = GridSpec(lat_min=32.5, lat_max=42.2, lon_min=-124.5, lon_max=-114.0, rows=28, cols=28)
-    tensor, days = detections_to_grid(df, grid)
+    feature_tensors, days = detections_to_feature_grids(df, grid)
+    tensor = feature_tensors["fire_count"]
 
-    x, y = build_features_targets(tensor)
+    x, y = build_features_targets(
+        tensor,
+        frp_tensor=feature_tensors["frp"],
+        confidence_tensor=feature_tensors["confidence"],
+        wind_speed_tensor=feature_tensors["wind_speed"],
+    )
     metrics = evaluate_models(x, y)
     tree_cv_metrics = evaluate_tree_baselines_multiseed_cv(x, y, seeds=(0, 1, 2, 3, 4), n_splits=5)
 
